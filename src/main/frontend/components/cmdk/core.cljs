@@ -84,11 +84,21 @@
   (when (and (not (string/blank? q))
              (not (#{"config.edn" "custom.js" "custom.css"} q))
              (not config/publishing?))
-    (let [class? (string/starts-with? q "#")]
-      (->> [{:text (if class? "Create tag" "Create page")       :icon "new-page"
+    (let [class? (string/starts-with? q "#")
+          class-name (get-class-from-input q)
+          class (ldb/class? (db/get-case-page class-name))]
+      (->> [{:text (cond
+                     class "Configure tag"
+                     class? "Create tag"
+                     :else "Create page")
+             :icon "new-page"
              :icon-theme :gray
              :info (if class?
-                     (str "Create class called '" (get-class-from-input q) "'")
+                     (let [class-name (get-class-from-input q)
+                           class (db/get-case-page class-name)]
+                       (if class
+                         (str "Configure #" class-name)
+                         (str "Create tag called '" class-name "'")))
                      (str "Create page called '" q "'"))
              :source-create :page}]
            (remove nil?)))))
@@ -117,14 +127,15 @@
                          (or (let [page (some-> (text/get-namespace-last-part input)
                                                 string/trim
                                                 db/get-page)
-                                   parent-title (:block/title (:logseq.property/parent page))
+                                   parent-title (:block/title (:block/parent page))
                                    namespace? (string/includes? input "/")]
                                (and page
                                     (or (not namespace?)
                                         (and
                                          parent-title
                                          (= (util/page-name-sanity-lc parent-title)
-                                            (util/page-name-sanity-lc (nth (reverse (string/split input "/")) 1)))))))
+                                            (some-> (util/nth-safe (reverse (string/split input "/")) 1)
+                                                    util/page-name-sanity-lc))))))
                              (some (fn [block]
                                      (and
                                       (:block/tags block)
@@ -281,13 +292,18 @@
 (defn- page-item
   [repo page]
   (let [entity (db/entity [:block/uuid (:block/uuid page)])
-        source-page (model/get-alias-source-page repo (:db/id entity))
+        source-page (or (model/get-alias-source-page repo (:db/id entity))
+                        (:alias page))
         icon (get-page-icon entity)
-        title (block-handler/block-unique-title page)
+        title (block-handler/block-unique-title (or entity page))
         title' (if source-page (str title " -> alias: " (:block/title source-page)) title)]
     (hash-map :icon icon
               :icon-theme :gray
               :text title'
+              :header (when (:block/parent entity)
+                        (block/breadcrumb {:disable-preview? true
+                                           :search? true} repo (:block/uuid page) {}))
+              :alias (:alias page)
               :source-page (or source-page page))))
 
 (defn- block-item
@@ -298,7 +314,8 @@
     {:icon icon
      :icon-theme :gray
      :text (highlight-content-query text @!input)
-     :header (when-not (db/page? block) (block/breadcrumb {:search? true} repo id {}))
+     :header (block/breadcrumb {:disable-preview? true
+                                :search? true} repo id {})
      :current-page? (when-let [page-id (:block/page block)]
                       (= page-id (:block/uuid current-page)))
      :source-block block}))
@@ -315,8 +332,6 @@
     (swap! !results assoc-in [:current-page :status] :loading)
     (p/let [blocks (search/block-search repo @!input opts)
             blocks (remove nil? blocks)
-            blocks (search/fuzzy-search blocks @!input {:limit 100
-                                                        :extract-fn :block/title})
             items (keep (fn [block]
                           (if (:page? block)
                             (page-item repo block)
@@ -436,9 +451,11 @@
 
 (defn- get-highlighted-page-uuid-or-name
   [state]
-  (let [highlighted-item (some-> state state->highlighted-item)]
-    (or (:block/uuid (:source-block highlighted-item))
-        (:block/uuid (:source-page highlighted-item)))))
+  (let [highlighted-item (some-> state state->highlighted-item)
+        block (or (:alias highlighted-item)
+                  (:source-block highlighted-item)
+                  (:source-page highlighted-item))]
+    (:block/uuid block)))
 
 (defmethod handle-action :open-page [_ state _event]
   (when-let [page-name (get-highlighted-page-uuid-or-name state)]
@@ -553,7 +570,7 @@
                      create-page? (page-handler/<create! @!input {:redirect? true}))]
       (shui/dialog-close! :ls-dialog-cmdk)
       (when (and create-class? result)
-        (state/sidebar-add-block! (state/get-current-repo) (:db/id result) :block)))))
+        (state/pub-event! [:dialog/show-block result {:tag-dialog? true}])))))
 
 (defn- get-filter-user-input
   [input]

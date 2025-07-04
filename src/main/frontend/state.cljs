@@ -36,21 +36,21 @@
 (defonce *editor-info (atom nil))
 
 (defn- <invoke-db-worker*
-  [qkw direct-pass-args? args-list]
+  [qkw direct-pass? args-list]
   (let [worker @*db-worker]
     (when (nil? worker)
       (prn :<invoke-db-worker-error qkw)
       (throw (ex-info "db-worker has not been initialized" {})))
-    (apply worker qkw direct-pass-args? args-list)))
+    (apply worker qkw direct-pass? args-list)))
 
 (defn <invoke-db-worker
   "invoke db-worker thread api"
   [qkw & args]
   (<invoke-db-worker* qkw false args))
 
-(defn <invoke-db-worker-direct-pass-args
+(defn <invoke-db-worker-direct-pass
   "invoke db-worker thread api.
-  But directly pass args to db-worker(won't do transit-write on them)."
+  But directly pass args to db-worker, and result from db-worker as well."
   [qkw & args]
   (<invoke-db-worker* qkw true args))
 
@@ -416,7 +416,7 @@
                       [(>= ?d ?start)]
                       [(<= ?d ?today)]]
              :inputs [:14d :today]
-             :collapsed? false}
+             :collapsed? true}
             {:title [:span (shui/tabler-icon "Todo" {:class "align-middle pr-1"}) [:span.align-middle "TODO"]]
              :query '[:find (pull ?b [*])
                       :in $ ?start ?next
@@ -428,7 +428,7 @@
                       [(< ?d ?next)]]
              :inputs [:today :7d-after]
              :group-by-page? false
-             :collapsed? false}]}
+             :collapsed? true}]}
           :ui/hide-empty-properties? false}))
 
 ;; State that most user config is dependent on
@@ -1205,16 +1205,22 @@ Similar to re-frame subscriptions"
 (defn- set-selection-blocks-aux!
   [blocks]
   (set-state! :view/selected-blocks nil)
-  (let [selected-ids (set (get-selected-block-ids @(:selection/blocks @state)))
+  (let [selected-blocks @(:selection/blocks @state)
+        selected-ids (set (get-selected-block-ids selected-blocks))
         _ (set-state! :selection/blocks blocks)
         new-ids (set (get-selection-block-ids))
         removed (set/difference selected-ids new-ids)]
     (mark-dom-blocks-as-selected blocks)
-    (doseq [id removed]
-      (doseq [node (dom/sel (util/format "[blockid='%s']" id))]
+    (if (= (count blocks) 1)
+      (doseq [node selected-blocks]
         (dom/remove-class! node "selected")
         (when (dom/has-class? node "ls-table-row")
-          (.blur node))))))
+          (.blur node)))
+      (doseq [id removed]
+        (doseq [node (dom/sel (util/format "[blockid='%s']" id))]
+          (dom/remove-class! node "selected")
+          (when (dom/has-class? node "ls-table-row")
+            (.blur node)))))))
 
 (defn set-selection-blocks!
   ([blocks]
