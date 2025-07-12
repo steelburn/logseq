@@ -36,7 +36,7 @@
         (let [ids (map (fn [id] (:db/id (db/entity [:block/uuid id]))) deleted-block-uuids)]
           (state/sidebar-remove-deleted-block! ids)))
 
-      (let [conn (db/get-db repo false)]
+      (when-let [conn (db/get-db repo false)]
         (cond
           initial-pages?
           (do
@@ -63,7 +63,7 @@
                             (if (contains? #{:create-property-text-block :insert-blocks} (:outliner-op tx-meta))
                               (let [update-blocks-fully-loaded (keep (fn [datom] (when (= :block/uuid (:a datom))
                                                                                    {:db/id (:e datom)
-                                                                                    :block.temp/fully-loaded? true})) tx-data)]
+                                                                                    :block.temp/load-status :self})) tx-data)]
                                 (concat update-blocks-fully-loaded tx-data))
                               tx-data))]
               (d/transact! conn tx-data' tx-meta))
@@ -78,7 +78,17 @@
             (state/set-state! :editor/start-pos nil)
 
             (when-not (:graph/importing @state/state)
-              (react/refresh! repo affected-keys)
+
+              (let [edit-block-f @(:editor/edit-block-fn @state/state)
+                    delete-blocks? (and (= (:outliner-op tx-meta) :delete-blocks)
+                                        (:local-tx? tx-meta)
+                                        (not (:mobile-action-bar? tx-meta)))]
+                (state/set-state! :editor/edit-block-fn nil)
+                (when delete-blocks?
+                  (util/mobile-keep-keyboard-open))
+                (react/refresh! repo affected-keys)
+                (when edit-block-f
+                  (util/schedule edit-block-f)))
 
               (when (and state/lsp-enabled?
                          (seq blocks)

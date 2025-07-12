@@ -5,6 +5,7 @@
             [frontend.db :as db]
             [frontend.handler.db-based.rtc-flows :as rtc-flows]
             [frontend.handler.notification :as notification]
+            [frontend.handler.repo :as repo-handler]
             [frontend.handler.user :as user-handler]
             [frontend.state :as state]
             [frontend.util :as util]
@@ -81,14 +82,17 @@
 (defn- notification-upload-higher-schema-graph!
   [repo]
   (notification/show!
-   [:div "The local graph has a higher schema version than the graph on the server."
-    (shui/button
-     {:on-click
-      (fn [e]
-        (util/stop e)
-        (p/do! (<rtc-branch-graph! repo)
-               (rtc-flows/trigger-rtc-start repo)))}
-     "Upload to server")]
+   [:div.flex.flex-col.gap-2
+    [:div "The local graph has a higher schema version than the graph on the server."]
+    [:div
+     (shui/button
+      {:size :sm
+       :on-click
+       (fn [e]
+         (util/stop e)
+         (p/do! (<rtc-branch-graph! repo)
+                (rtc-flows/trigger-rtc-start repo)))}
+      "Upload to server")]]
    :warning false))
 
 (defn <rtc-start!
@@ -142,7 +146,8 @@
                                   :GraphUUID (:graph-uuid graph)
                                   :rtc-graph? true})
                                (dissoc graph :graph-uuid :graph-name)))))]
-    (state/set-state! :rtc/graphs result)))
+    (state/set-state! :rtc/graphs result)
+    (repo-handler/refresh-repos!)))
 
 (defn <rtc-get-users-info
   []

@@ -9,6 +9,7 @@
             [frontend.worker.rtc.branch-graph :as r.branch-graph]
             [frontend.worker.rtc.client :as r.client]
             [frontend.worker.rtc.client-op :as client-op]
+            [frontend.worker.rtc.db :as rtc-db]
             [frontend.worker.rtc.exception :as r.ex]
             [frontend.worker.rtc.full-upload-download-graph :as r.upload-download]
             [frontend.worker.rtc.log-and-state :as rtc-log-and-state]
@@ -73,8 +74,10 @@
 
 (defn- create-pull-remote-updates-flow
   "Return a flow: emit to pull remote-updates.
-  reschedule next emit(INTERVAL-MS later) every time FLOW emit a value."
-  [interval-ms flow]
+  reschedule next emit(INTERVAL-MS later) every time RESCHEDULE-FLOW emit a value.
+  TODO: add immediate-emit-flow arg,
+        e.g. when mobile-app becomes active, trigger one pull-remote-updates"
+  [interval-ms reschedule-flow & [_immediate-emit-flow]]
   (let [v {:type :pull-remote-updates}
         clock-flow (m/ap
                      (loop []
@@ -84,7 +87,7 @@
     (m/ap
       (m/amb
        v
-       (let [_ (m/?< (c.m/continue-flow flow))]
+       (let [_ (m/?< (c.m/continue-flow reschedule-flow))]
          (try
            (m/?< clock-flow)
            (catch Cancelled _ (m/amb))))))))
@@ -197,6 +200,16 @@
       (finally
         (reset! *rtc-lock nil)))))
 
+(def ^:private *graph-uuid->*online-users (atom {}))
+(defn- get-or-create-*online-users
+  [graph-uuid]
+  (assert (uuid? graph-uuid) graph-uuid)
+  (if-let [*online-users (get @*graph-uuid->*online-users graph-uuid)]
+    *online-users
+    (let [*online-users (atom nil)]
+      (swap! *graph-uuid->*online-users assoc graph-uuid *online-users)
+      *online-users)))
+
 (declare new-task--inject-users-info)
 (defn- create-rtc-loop
   "Return a map with [:rtc-state-flow :rtc-loop-task :*rtc-auto-push? :onstarted-task]
@@ -208,7 +221,7 @@
         *auto-push?                (atom auto-push?)
         *remote-profile?           (atom false)
         *last-calibrate-t          (atom nil)
-        *online-users              (atom nil)
+        *online-users              (get-or-create-*online-users graph-uuid)
         *assets-sync-loop-canceler (atom nil)
         *server-schema-version     (atom nil)
         started-dfv                (m/dfv)
@@ -234,6 +247,7 @@
       started-dfv
       (m/sp
         (try
+          (log/info :rtc :loop-starting)
           ;; init run to open a ws
           (m/? get-ws-create-task)
           (started-dfv true)
@@ -355,10 +369,15 @@
                          rtc-loop-task
                          :fail (fn [e]
                                  (reset! *last-stop-exception e)
-                                 (log/info :rtc-loop-task e)))
+                                 (log/info :rtc-loop-task e)
+                                 (when (= :rtc.exception/ws-timeout (some-> e ex-data :type))
+                                   ;; if fail reason is websocket-timeout, try to restart rtc
+                                   (worker-state/<invoke-main-thread :thread-api/rtc-start-request repo))))
               start-ex (m/? onstarted-task)]
           (if (instance? ExceptionInfo start-ex)
-            start-ex
+            (do
+              (canceler)
+              start-ex)
             (do (reset! *rtc-loop-metadata {:repo repo
                                             :graph-uuid graph-uuid
                                             :local-graph-schema-version schema-version
@@ -430,7 +449,14 @@
                                     {:action "delete-graph"
                                      :graph-uuid graph-uuid
                                      :schema-version (str schema-version)}))]
-        (when ex-data (log/info ::delete-graph-failed {:graph-uuid graph-uuid :ex-data ex-data}))
+        (if ex-data
+          (log/info ::delete-graph-failed {:graph-uuid graph-uuid :ex-data ex-data})
+          ;; Clean up rtc data in existing dbs so that the graph can be uploaded again
+          (when-let [repo (worker-state/get-current-repo)]
+            (when-let [conn (worker-state/get-datascript-conn repo)]
+              (let [graph-id (ldb/get-graph-rtc-uuid @conn)]
+                (when (= (str graph-id) (str graph-uuid))
+                  (rtc-db/remove-rtc-data-in-conn! repo))))))
         (boolean (nil? ex-data))))))
 
 (defn new-task--get-users-info
@@ -480,12 +506,13 @@
             (m/?<
              (m/latest
               (fn [rtc-state rtc-auto-push? rtc-remote-profile?
-                   rtc-lock online-users pending-local-ops-count [local-tx remote-tx]]
+                   rtc-lock online-users pending-local-ops-count pending-asset-ops-count [local-tx remote-tx]]
                 {:graph-uuid graph-uuid
                  :local-graph-schema-version (db-schema/schema-version->string local-graph-schema-version)
                  :remote-graph-schema-version (db-schema/schema-version->string remote-graph-schema-version)
                  :user-uuid user-uuid
                  :unpushed-block-update-count pending-local-ops-count
+                 :pending-asset-ops-count pending-asset-ops-count
                  :local-tx local-tx
                  :remote-tx remote-tx
                  :rtc-state rtc-state
@@ -498,6 +525,7 @@
               (m/watch *rtc-auto-push?) (m/watch *rtc-remote-profile?)
               (m/watch *rtc-lock') (m/watch *online-users)
               (client-op/create-pending-block-ops-count-flow repo)
+              (client-op/create-pending-asset-ops-count-flow repo)
               (rtc-log-and-state/create-local&remote-t-flow graph-uuid))))
           (catch Cancelled _))))))
 
@@ -639,7 +667,8 @@
   (c.m/run-background-task
    ::subscribe-state
    (m/reduce
-    (fn [_ v] (shared-service/broadcast-to-clients! :rtc-sync-state v))
+    (fn [_ v]
+      (shared-service/broadcast-to-clients! :rtc-sync-state v))
     create-get-state-flow)))
 
 (comment

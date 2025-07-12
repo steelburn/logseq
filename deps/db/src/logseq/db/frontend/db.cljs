@@ -3,8 +3,10 @@
   (:require [clojure.set :as set]
             [clojure.string :as string]
             [datascript.core :as d]
+            [logseq.common.config :as common-config]
             [logseq.common.util.namespace :as ns-util]
             [logseq.common.util.page-ref :as page-ref]
+            [logseq.common.uuid :as common-uuid]
             [logseq.db.frontend.class :as db-class]
             [logseq.db.frontend.entity-util :as entity-util]
             [logseq.db.frontend.property :as db-property]))
@@ -43,33 +45,47 @@
        (map (fn [d] (d/entity db (:e d))))))
 
 (defn get-page-parents
-  [node & {:keys [node-class?]}]
-  (when-let [parent (:logseq.property/parent node)]
+  [node]
+  (when-let [parent (:block/parent node)]
     (loop [current-parent parent
            parents' []]
-      (if (and
-           current-parent
-           (if node-class? (entity-util/class? current-parent) true)
-           (not (contains? parents' current-parent)))
-        (recur (:logseq.property/parent current-parent)
+      (if (and current-parent
+               (not (contains? parents' current-parent)))
+        (recur (:block/parent current-parent)
                (conj parents' current-parent))
         (vec (reverse parents'))))))
 
+(defn- get-class-title-with-extends
+  [entity]
+  (let [parents' (->> (db-class/get-class-extends entity)
+                      (remove (fn [e] (= :logseq.class/Root (:db/ident e))))
+                      vec)]
+    (string/join
+     ns-util/parent-char
+     (map :block/title (conj (vec parents') entity)))))
+
 (defn get-title-with-parents
   [entity]
-  (if (or (entity-util/class? entity) (entity-util/internal-page? entity))
+  (cond
+    (entity-util/class? entity)
+    (get-class-title-with-extends entity)
+
+    (entity-util/page? entity)
     (let [parents' (->> (get-page-parents entity)
-                        (remove (fn [e] (= :logseq.class/Root (:db/ident e))))
-                        vec)]
+                        (remove (fn [e]
+                                  (and (:logseq.property/built-in? e) (= common-config/library-page-name (:block/title e))))))]
       (string/join
        ns-util/parent-char
        (map :block/title (conj (vec parents') entity))))
+
+    :else
     (:block/title entity)))
 
 (defn get-classes-parents
+  "Returns all parents of all classes. Like get-class-extends but for multiple classes"
   [tags]
   (let [tags' (filter entity-util/class? tags)
-        result (mapcat #(get-page-parents % {:node-class? true}) tags')]
+        result (mapcat db-class/get-class-extends tags')]
     (set result)))
 
 (defn class-instance?
@@ -105,3 +121,14 @@
     :logseq.class/Math-block :math
     :logseq.class/Quote-block :quote
     nil))
+
+(defn get-built-in-page
+  [db title]
+  (when db
+    (let [id (common-uuid/gen-uuid :builtin-block-uuid title)]
+      (d/entity db [:block/uuid id]))))
+
+(defn library?
+  [page]
+  (and (entity-util/built-in? page)
+       (= common-config/library-page-name (:block/title page))))

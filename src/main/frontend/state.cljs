@@ -35,22 +35,28 @@
 (defonce *db-worker (atom nil))
 (defonce *editor-info (atom nil))
 
+(def db-worker-ready-flow
+  "`<invoke-db-worker` throws err if `*db-worker` not ready yet.
+  Use this flow to wait till db-worker ready."
+  (->> (m/watch *db-worker)
+       (m/eduction (map some?))))
+
 (defn- <invoke-db-worker*
-  [qkw direct-pass-args? args-list]
+  [qkw direct-pass? args-list]
   (let [worker @*db-worker]
     (when (nil? worker)
       (prn :<invoke-db-worker-error qkw)
       (throw (ex-info "db-worker has not been initialized" {})))
-    (apply worker qkw direct-pass-args? args-list)))
+    (apply worker qkw direct-pass? args-list)))
 
 (defn <invoke-db-worker
   "invoke db-worker thread api"
   [qkw & args]
   (<invoke-db-worker* qkw false args))
 
-(defn <invoke-db-worker-direct-pass-args
+(defn <invoke-db-worker-direct-pass
   "invoke db-worker thread api.
-  But directly pass args to db-worker(won't do transit-write on them)."
+  But directly pass args to db-worker, and result from db-worker as well."
   [qkw & args]
   (<invoke-db-worker* qkw true args))
 
@@ -150,7 +156,7 @@
       :editor/action-data                    nil
       ;; With label or other data
       :editor/last-saved-cursor              (atom {})
-      :editor/editing?                       (atom {})
+      :editor/editing?                       (atom nil)
       :editor/in-composition?                false
       :editor/content                        (atom {})
       :editor/block                          (atom nil)
@@ -179,6 +185,7 @@
       :editor/next-edit-block                (atom nil)
       :editor/raw-mode-block                 (atom nil)
       :editor/virtualized-scroll-fn          nil
+      :editor/edit-block-fn                  (atom nil)
 
       ;; Warning: blocks order is determined when setting this attribute
       :selection/blocks                      (atom [])
@@ -214,10 +221,7 @@
       ;; mobile
       :mobile/container-urls                 nil
       :mobile/show-action-bar?               false
-      :mobile/actioned-block                 nil
-      :mobile/show-toolbar?                  false
       :mobile/show-recording-bar?            false
-      :mobile/show-tabbar?                   false
 
       ;; plugin
       :plugin/enabled                        (and util/plugin-platform?
@@ -322,7 +326,6 @@
       :ui/cached-key->container-id           (atom {})
       :feature/enable-sync?                  (storage/get :logseq-sync-enabled)
       :feature/enable-sync-diff-merge?       ((fnil identity true) (storage/get :logseq-sync-diff-merge-enabled))
-      :feature/enable-rtc?                   (storage/get :logseq-rtc-enabled)
 
       :file/rename-event-chan                (async/chan 100)
       :ui/find-in-page                       nil
@@ -416,7 +419,7 @@
                       [(>= ?d ?start)]
                       [(<= ?d ?today)]]
              :inputs [:14d :today]
-             :collapsed? false}
+             :collapsed? true}
             {:title [:span (shui/tabler-icon "Todo" {:class "align-middle pr-1"}) [:span.align-middle "TODO"]]
              :query '[:find (pull ?b [*])
                       :in $ ?start ?next
@@ -428,7 +431,7 @@
                       [(< ?d ?next)]]
              :inputs [:today :7d-after]
              :group-by-page? false
-             :collapsed? false}]}
+             :collapsed? true}]}
           :ui/hide-empty-properties? false}))
 
 ;; State that most user config is dependent on
@@ -743,10 +746,6 @@ Similar to re-frame subscriptions"
    (enable-whiteboards? (get-current-repo)))
   ([repo]
    (not (false? (:feature/enable-whiteboards? (sub-config repo))))))
-
-(defn enable-rtc?
-  []
-  (sub :feature/enable-rtc?))
 
 (defn enable-git-auto-push?
   [repo]
@@ -1202,19 +1201,24 @@ Similar to re-frame subscriptions"
     (async/put! chan [payload d])
     d))
 
+(defn- unselect-node
+  [node]
+  (dom/remove-class! node "selected")
+  (when (dom/has-class? node "ls-table-row")
+    (.blur node)))
+
 (defn- set-selection-blocks-aux!
   [blocks]
   (set-state! :view/selected-blocks nil)
-  (let [selected-ids (set (get-selected-block-ids @(:selection/blocks @state)))
+  (let [selected-blocks @(:selection/blocks @state)
+        selected-ids (set (get-selected-block-ids selected-blocks))
         _ (set-state! :selection/blocks blocks)
         new-ids (set (get-selection-block-ids))
         removed (set/difference selected-ids new-ids)]
     (mark-dom-blocks-as-selected blocks)
     (doseq [id removed]
       (doseq [node (dom/sel (util/format "[blockid='%s']" id))]
-        (dom/remove-class! node "selected")
-        (when (dom/has-class? node "ls-table-row")
-          (.blur node))))))
+        (unselect-node node)))))
 
 (defn set-selection-blocks!
   ([blocks]
@@ -1252,16 +1256,18 @@ Similar to re-frame subscriptions"
   (seq (get-selection-blocks)))
 
 (defn conj-selection-block!
-  [block-or-blocks direction]
-  (let [selection-blocks (get-unsorted-selection-blocks)
-        block-or-blocks (if (sequential? block-or-blocks) block-or-blocks [block-or-blocks])
-        blocks (-> (concat selection-blocks block-or-blocks)
-                   distinct)]
-    (set-selection-blocks! blocks direction)))
+  ([block-or-blocks]
+   (conj-selection-block! block-or-blocks (get-selection-direction)))
+  ([block-or-blocks direction]
+   (let [selection-blocks (get-unsorted-selection-blocks)
+         block-or-blocks (if (sequential? block-or-blocks) block-or-blocks [block-or-blocks])
+         blocks (-> (concat selection-blocks block-or-blocks)
+                    distinct)]
+     (set-selection-blocks! blocks direction))))
 
 (defn drop-selection-block!
   [block]
-  (set-selection-blocks-aux! (-> (remove #(= block %) (get-unsorted-selection-blocks))
+  (set-selection-blocks-aux! (-> (remove #(= (.-id block) (.-id %)) (get-unsorted-selection-blocks))
                                  vec)))
 
 (defn drop-selection-blocks-starts-with!
@@ -1381,7 +1387,7 @@ Similar to re-frame subscriptions"
       :or {clear-editing-block? true}}]
   (clear-editor-action!)
   (when clear-editing-block?
-    (set-state! :editor/editing? {})
+    (set-state! :editor/editing? nil)
     (set-state! :editor/block nil))
   (set-state! :editor/start-pos nil)
   (clear-editor-last-pos!)
@@ -1832,10 +1838,6 @@ Similar to re-frame subscriptions"
   []
   (toggle! :ui/settings-open?))
 
-(defn settings-open?
-  []
-  (:ui/settings-open? @state))
-
 (defn close-settings!
   []
   (set-state! :ui/settings-open? false))
@@ -1994,10 +1996,6 @@ Similar to re-frame subscriptions"
 
             (when (or (util/mobile?) (mobile-util/native-platform?))
               (set-state! :mobile/show-action-bar? false))))))))
-
-(defn action-bar-open?
-  []
-  (:mobile/show-action-bar? @state))
 
 (defn get-git-auto-commit-enabled?
   []
@@ -2286,8 +2284,7 @@ Similar to re-frame subscriptions"
 
 (defn set-color-accent! [color]
   (swap! state assoc :ui/radix-color color)
-  (storage/set :ui/radix-color color)
-  (util/set-android-theme))
+  (storage/set :ui/radix-color color))
 
 (defn set-editor-font! [font]
   (let [font (if (keyword? font) (name font) (str font))]
@@ -2360,8 +2357,3 @@ Similar to re-frame subscriptions"
   [days]
   (reset! (:ui/highlight-recent-days @state) days)
   (storage/set :ui/highlight-recent-days days))
-
-(defn set-rtc-enabled!
-  [value]
-  (storage/set :logseq-rtc-enabled value)
-  (set-state! :feature/enable-rtc? value))

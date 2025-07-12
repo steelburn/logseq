@@ -5,12 +5,12 @@
             [frontend.common.thread-api :as thread-api :refer [def-thread-api]]
             [frontend.config :as config]
             [frontend.fs :as fs]
-            [frontend.mobile.util :as mobile-util]
             [frontend.state :as state]
             [frontend.util :as util]
             [logseq.common.config :as common-config]
             [logseq.common.path :as path]
             [logseq.common.util :as common-util]
+            [logseq.db.frontend.asset :as db-asset]
             [medley.core :as medley]
             [missionary.core :as m]
             [promesa.core :as p])
@@ -49,15 +49,6 @@
     (medley/find-first #(= name (:name (second %1)))
                        (medley/indexed alias-dirs))))
 
-(defn- convert-platform-protocol
-  [full-path]
-
-  (cond-> full-path
-    (and (string? full-path)
-         (mobile-util/native-platform?))
-    (string/replace-first
-     #"^(file://|assets://)" common-config/capacitor-protocol-with-prefix)))
-
 (defn resolve-asset-real-path-url
   [repo rpath]
   (when-let [rpath (and (string? rpath)
@@ -86,7 +77,7 @@
                     (if has-schema?
                       (path/path-join graph-root rpath)
                       (path/prepend-protocol "file:" (path/path-join graph-root rpath)))))]
-        (convert-platform-protocol ret)))))
+        ret))))
 
 (defn normalize-asset-resource-url
   "try to convert resource file to url asset link"
@@ -178,26 +169,18 @@
         ;; fullpath will be encoded
         (path/prepend-protocol "assets:" full-path)
 
-        (mobile-util/native-platform?)
-        (mobile-util/convert-file-src full-path)
+        ;(mobile-util/native-platform?)
+        ;(mobile-util/convert-file-src full-path)
 
         (config/db-based-graph? (state/get-current-repo)) ; memory fs
         (p/let [binary (fs/read-file repo-dir path {})
                 blob (js/Blob. (array binary) (clj->js {:type "image"}))]
           (when blob (js/URL.createObjectURL blob)))))))
 
-(defn- decode-digest
-  [^js/Uint8Array digest]
-  (.. (js/Array.from digest)
-      (map (fn [s] (.. s (toString 16) (padStart 2 "0"))))
-      (join "")))
-
 (defn get-file-checksum
   [^js/Blob file]
   (-> (.arrayBuffer file)
-      (.then (fn [buf] (js/crypto.subtle.digest "SHA-256" buf)))
-      (.then (fn [dig] (js/Uint8Array. dig)))
-      (.then decode-digest)))
+      (.then db-asset/<get-file-array-buffer-checksum)))
 
 (defn <get-all-assets
   []

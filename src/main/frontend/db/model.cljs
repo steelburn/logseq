@@ -229,13 +229,14 @@ independent of format as format specific heading characters are stripped"
 
 (defn get-block-deep-last-open-child-id
   [db db-id]
-  (loop [node (db-utils/entity db db-id)]
-    (if-let [last-child-id (get-block-last-direct-child-id db (:db/id node) true)]
-      (let [e (db-utils/entity db last-child-id)]
-        (if (or (:block/collapsed? e) (empty? (:block/_parent e)))
-          last-child-id
-          (recur e)))
-      nil)))
+  (when db
+    (loop [node (db-utils/entity db db-id)]
+      (if-let [last-child-id (get-block-last-direct-child-id db (:db/id node) true)]
+        (let [e (db-utils/entity db last-child-id)]
+          (if (or (:block/collapsed? e) (empty? (:block/_parent e)))
+            last-child-id
+            (recur e)))
+        nil))))
 
 (def page? ldb/page?)
 
@@ -313,15 +314,6 @@ independent of format as format specific heading characters are stripped"
   (when-let [db (conn/get-db repo)]
     (ldb/get-children db block-uuid)))
 
-(defn get-block-children
-  "Including nested children."
-  [repo block-uuid]
-  (when-let [db (conn/get-db repo)]
-    (let [ids (ldb/get-block-children-ids db block-uuid)]
-      (when (seq ids)
-        (let [ids' (map (fn [id] [:block/uuid id]) ids)]
-          (db-utils/pull-many repo '[*] ids'))))))
-
 (defn get-block-and-children
   [repo block-uuid & {:as opts}]
   (let [db (conn/get-db repo)]
@@ -331,6 +323,11 @@ independent of format as format specific heading characters are stripped"
   [page-id-name-or-uuid]
   (when page-id-name-or-uuid
     (ldb/get-page (conn/get-db) page-id-name-or-uuid)))
+
+(defn get-journal-page
+  [page-name]
+  (when page-name
+    (ldb/get-journal-page (conn/get-db) page-name)))
 
 (defn get-case-page
   [page-name-or-uuid]
@@ -529,10 +526,10 @@ independent of format as format specific heading characters are stripped"
           view-context (get m :logseq.property/view-context :all)]
       (or (contains? #{:logseq.property/query} (:db/ident m))
           (and (not block-page?) (contains? #{:block/alias} (:db/ident m)))
-        ;; Filters out properties from being in wrong :view-context and :never view-contexts
+          ;; Filters out properties from being in wrong :view-context and :never view-contexts
           (and (not= view-context :all) (not (contains? block-types view-context)))
-          (and (ldb/built-in? block) (contains? #{:logseq.property/parent} (:db/ident m)))
-        ;; Filters out adding buggy class properties e.g. Alias and Parent
+          (and (ldb/built-in? block) (contains? #{:logseq.property.class/extends} (:db/ident m)))
+          ;; Filters out adding buggy class properties e.g. Alias and Parent
           (and class-schema? (ldb/public-built-in-property? m) (:logseq.property/view-context m))))))
 
 (defn get-all-properties
@@ -577,7 +574,7 @@ independent of format as format specific heading characters are stripped"
   [repo class-id]
   (when-let [class (db-utils/entity repo class-id)]
     (->>
-     (if (first (:logseq.property/_parent class))        ; has children classes
+     (if (first (:logseq.property.class/_extends class))        ; has children classes
        (let [all-classes (conj (->> (get-structured-children repo class-id)
                                     (map #(db-utils/entity repo %)))
                                class)]

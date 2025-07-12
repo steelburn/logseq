@@ -17,15 +17,14 @@
             [frontend.handler.route :as route-handler]
             [frontend.handler.ui :as ui-handler]
             [frontend.idb :as idb]
-            [frontend.mobile.util :as mobile-util]
             [frontend.persist-db :as persist-db]
             [frontend.search :as search]
             [frontend.state :as state]
             [frontend.undo-redo :as undo-redo]
             [frontend.util :as util]
-            [frontend.util.fs :as util-fs]
             [frontend.util.text :as text-util]
             [logseq.common.config :as common-config]
+            [logseq.db.frontend.schema :as db-schema]
             [promesa.core :as p]))
 
 ;; Project settings should be checked in two situations:
@@ -76,7 +75,8 @@
    (when (config/global-config-enabled?)
      (global-config-handler/restore-global-config!))
     ;; Don't have to unlisten the old listener, as it will be destroyed with the conn
-   (ui-handler/add-style-if-exists!)
+   (when-not (true? (:ignore-style? opts))
+     (ui-handler/add-style-if-exists!))
    (when-not config/publishing?
      (state/set-db-restoring! false))))
 
@@ -120,8 +120,8 @@
                        (cond (util/electron?)
                              (ipc/ipc :inflateGraphsInfo nfs-dbs)
 
-                             (mobile-util/native-platform?)
-                             (util-fs/inflate-graphs-info nfs-dbs)
+                             ;(mobile-util/native-platform?)
+                             ;(util-fs/inflate-graphs-info nfs-dbs)
 
                              :else
                              nfs-dbs))]
@@ -136,10 +136,18 @@
                                       local-repos)
                                  (some->> remote-repos
                                           (map #(assoc % :remote? true)))))]
-    (let [repos' (group-by :GraphUUID repos')
+    (let [app-major-schema-version (str (:major (db-schema/parse-schema-version db-schema/version)))
+          repos' (group-by :GraphUUID repos')
           repos'' (mapcat (fn [[k vs]]
-                            (if-not (nil? k)
-                              [(merge (first vs) (second vs))] vs))
+                            (if (some? k)
+                              (let [remote-repos (filter :remote? vs)
+                                    version-matched-remote-repo
+                                    (first
+                                     (filter
+                                      #(= app-major-schema-version (:GraphSchemaVersion %))
+                                      remote-repos))]
+                                [(merge (first vs) (second vs) version-matched-remote-repo)])
+                              vs))
                           repos')]
       (sort-by (fn [repo]
                  (let [graph-name (or (:GraphName repo)

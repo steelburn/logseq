@@ -6,6 +6,7 @@
             [datascript.core]
             [datascript.impl.entity :as de]
             [datascript.transit :as dt]
+            [logseq.common.config :as common-config]
             [logseq.common.util :as common-util]
             [logseq.common.uuid :as common-uuid]
             [logseq.db.common.order :as db-order]
@@ -65,7 +66,6 @@
    * :block-uuid - :block/uuid for property"
   ([db-ident prop-schema] (build-new-property db-ident prop-schema {}))
   ([db-ident prop-schema {:keys [title block-uuid ref-type? properties]}]
-   (assert (keyword? db-ident))
    (let [db-ident' (if (qualified-keyword? db-ident)
                      db-ident
                      (db-property/create-user-property-ident-from-name (name db-ident)))
@@ -99,17 +99,20 @@
    (cond-> (merge block
                   {:block/tags (set (conj (:block/tags block) :logseq.class/Tag))})
      (and (not= (:db/ident block) :logseq.class/Root)
-          (nil? (:logseq.property/parent block)))
-     (assoc :logseq.property/parent :logseq.class/Root))))
+          (nil? (:logseq.property.class/extends block)))
+     (assoc :logseq.property.class/extends :logseq.class/Root))))
 
 (defn build-new-page
   "Builds a basic page to be transacted. A minimal version of gp-block/page-name->map"
-  [page-name]
+  [title]
   (block-with-timestamps
-   {:block/name (common-util/page-name-sanity-lc page-name)
-    :block/title page-name
-    :block/uuid (common-uuid/gen-uuid :builtin-block-uuid page-name)
-    :block/tags #{:logseq.class/Page}}))
+   (cond->
+    {:block/name (common-util/page-name-sanity-lc title)
+     :block/title title
+     :block/uuid (common-uuid/gen-uuid :builtin-block-uuid title)
+     :block/tags #{:logseq.class/Page}}
+     (contains? #{common-config/quick-add-page-name} title)
+     (assoc :logseq.property/hide? true))))
 
 (defn kv
   "Creates a key-value pair tx with the key and value respectively stored under
