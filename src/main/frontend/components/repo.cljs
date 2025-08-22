@@ -128,6 +128,7 @@
               "Delete local graph"))
            (when (and db-based? root
                       (user-handler/logged-in?)
+                      (user-handler/rtc-group?)
                       (not remote?)
                       (= url (state/get-current-repo)))
              (shui/dropdown-menu-item
@@ -378,10 +379,11 @@
      [:div.cp__repos-list-wrap
       (for [{:keys [hr item hover-detail title options icon]} (items-fn)]
         (let [on-click' (:on-click options)
-              href' (:href options)]
+              href' (:href options)
+              menu-item (if (util/mobile?) ui/menu-link shui/dropdown-menu-item)]
           (if hr
-            (shui/dropdown-menu-separator)
-            (shui/dropdown-menu-item
+            (if (util/mobile?) [:hr.py-2] (shui/dropdown-menu-separator))
+            (menu-item
              (assoc options
                     :title hover-detail
                     :on-click (fn [^js e]
